@@ -8,6 +8,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/dynamicinformer"
+	"k8s.io/klog/v2"
 	"net/http"
 	"time"
 
@@ -48,7 +49,8 @@ func runController(ctx context.Context) {
 	// 定义你的 CRD GroupVersionResource
 	gvr := schema.GroupVersionResource{Group: "example.com", Version: "v1", Resource: "examples"}
 	// 创建 Informer 来监听特定的 CRD 资源
-
+	klog.Info("Creating informer for MyResource")
+	klog.Info("GVR: ", gvr)
 	factory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(dynamicClient, 0, "", nil)
 	myResourceInformer := factory.ForResource(gvr).Informer()
 
@@ -104,11 +106,6 @@ func runController(ctx context.Context) {
 
 	kubeInformerFactory.Start(stopCh)
 
-	if !cache.WaitForCacheSync(stopCh, podListerSynced, myResourceInformer.HasSynced) {
-		fmt.Println("Timed out waiting for caches to sync")
-		return
-	}
-
 	utils.Ready = true // 设置 Readiness 探针为 true
 
 	config := process.Cfg{
@@ -128,6 +125,11 @@ func runController(ctx context.Context) {
 	http.HandleFunc("/readiness", utils.ReadinessHandler)
 	http.HandleFunc("/liveness", utils.LivenessHandler)
 	go http.ListenAndServe(":8080", nil)
+
+	if !cache.WaitForCacheSync(stopCh, podListerSynced, myResourceInformer.HasSynced) {
+		fmt.Println("Timed out waiting for caches to sync")
+		return
+	}
 
 	// 等待停止信号
 	<-ctx.Done()

@@ -8,7 +8,7 @@ var Ready = false
 func ReadinessHandler(w http.ResponseWriter, r *http.Request) {
 	if Ready {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok"))
+		w.Write([]byte("ok\n"))
 	} else {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}
@@ -17,5 +17,5 @@ func ReadinessHandler(w http.ResponseWriter, r *http.Request) {
 // LivenessHandler Liveness 探针处理函数
 func LivenessHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("alive"))
+	w.Write([]byte("alive\n"))
 }
