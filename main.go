@@ -5,17 +5,21 @@ import (
 	"fmt"
 	"informerTemplate/pkg/process"
 	"informerTemplate/utils"
+	"net/http"
+	"time"
+
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/klog/v2"
-	"net/http"
-	"time"
 
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 var (
@@ -23,7 +27,40 @@ var (
 	PodInformer     cache.SharedIndexInformer
 	podListerSynced cache.InformerSynced
 	dynamicClient   *dynamic.DynamicClient
+
+	// 定义 Prometheus 指标
+	eventCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "myresource_events_total",
+			Help: "Total number of MyResource events processed",
+		},
+		[]string{"event_type"},
+	)
+
+	queueDepthGauge = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "myresource_queue_depth",
+			Help: "Current depth of MyResource event queues",
+		},
+		[]string{"queue_name"},
+	)
+
+	processingDurationHistogram = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "myresource_processing_duration_seconds",
+			Help:    "Duration of MyResource event processing",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"event_type"},
+	)
 )
+
+func init() {
+	// 注册 Prometheus 指标
+	prometheus.MustRegister(eventCounter)
+	prometheus.MustRegister(queueDepthGauge)
+	prometheus.MustRegister(processingDurationHistogram)
+}
 
 func main() {
 	// Initialize Kubernetes client
@@ -54,16 +91,6 @@ func runController(ctx context.Context) {
 	factory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(dynamicClient, 0, "", nil)
 	myResourceInformer := factory.ForResource(gvr).Informer()
 
-	//// 这样写只能对于内建的资源
-	//// 为 MyResource 创建 informer是的不对的
-	//myTempResourceInformer, _ := kubeInformerFactory.ForResource(
-	//	schema.GroupVersionResource(metav1.GroupVersionResource{
-	//		Group:    "mygroup.example.com",
-	//		Version:  "v1",
-	//		Resource: "myresources",
-	//	}))
-	//myTempResourceInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{})
-
 	// 创建工作队列
 	addQueue := workqueue.NewRateLimitingQueueWithConfig(workqueue.DefaultControllerRateLimiter(),
 		workqueue.RateLimitingQueueConfig{
@@ -84,18 +111,24 @@ func runController(ctx context.Context) {
 			key, err := cache.MetaNamespaceKeyFunc(obj)
 			if err == nil {
 				addQueue.Add(key)
+				eventCounter.WithLabelValues("add").Inc()
+				klog.Infof("Add event: Added %s to AddQueue", key)
 			}
 		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
 			key, err := cache.MetaNamespaceKeyFunc(newObj)
 			if err == nil {
 				updateQueue.Add(key)
+				eventCounter.WithLabelValues("update").Inc()
+				klog.Infof("Update event: Added %s to UpdateQueue", key)
 			}
 		},
 		DeleteFunc: func(obj interface{}) {
 			key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
 			if err == nil {
 				deleteQueue.Add(key)
+				eventCounter.WithLabelValues("delete").Inc()
+				klog.Infof("Delete event: Added %s to DeleteQueue", key)
 			}
 		},
 	})
@@ -121,9 +154,20 @@ func runController(ctx context.Context) {
 	// 启动协程处理 Delete 事件
 	go process.ProcessQueue(deleteQueue, "Delete", config)
 
-	// 启动 HTTP 服务器，用于 Readiness 和 Liveness 探针
+	// 启动协程更新队列深度指标
+	go func() {
+		for {
+			queueDepthGauge.WithLabelValues("add").Set(float64(addQueue.Len()))
+			queueDepthGauge.WithLabelValues("update").Set(float64(updateQueue.Len()))
+			queueDepthGauge.WithLabelValues("delete").Set(float64(deleteQueue.Len()))
+			time.Sleep(5 * time.Second)
+		}
+	}()
+
+	// 启动 HTTP 服务器，用于 Readiness 和 Liveness 探针以及 Prometheus 指标
 	http.HandleFunc("/readiness", utils.ReadinessHandler)
 	http.HandleFunc("/liveness", utils.LivenessHandler)
+	http.Handle("/metrics", promhttp.Handler())
 	go http.ListenAndServe(":8080", nil)
 
 	if !cache.WaitForCacheSync(stopCh, podListerSynced, myResourceInformer.HasSynced) {
@@ -133,4 +177,5 @@ func runController(ctx context.Context) {
 
 	// 等待停止信号
 	<-ctx.Done()
+	klog.Info("Controller stopped")
 }
